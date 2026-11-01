@@ -136,7 +136,13 @@ object Helpers {
         val imageZoom: Boolean,
         val imageFill: Boolean,
         val layout: String,
-        val language: String
+        val language: String,
+        val playAudio: Boolean
+    )
+
+    data class AssetItem(
+        val id: String,
+        val type: String?
     )
 
     data class Weather(
@@ -154,6 +160,9 @@ object Helpers {
 
         @GET("api/Config")
         fun getServerSettings(): Call<ServerSettings>
+
+        @GET("api/Asset")
+        fun getAssets(): Call<List<AssetItem>>
 
         @GET("api/Weather")
         fun getWeather(): Call<Weather>

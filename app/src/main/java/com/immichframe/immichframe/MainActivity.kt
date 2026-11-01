@@ -56,6 +56,16 @@ import androidx.core.graphics.toColorInt
 import androidx.core.graphics.drawable.toDrawable
 import androidx.core.net.toUri
 import androidx.core.view.isVisible
+import androidx.annotation.OptIn
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.PlayerView
+import okhttp3.OkHttpClient
 
 class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
@@ -82,11 +92,22 @@ class MainActivity : AppCompatActivity() {
     private var previousImage: Helpers.ImageResponse? = null
     private var currentImage: Helpers.ImageResponse? = null
     private var portraitCache: Helpers.ImageResponse? = null
+    private lateinit var videoView: PlayerView
+    private var player: ExoPlayer? = null
+    private var isPlayingVideo = false
+    private val assetQueue = ArrayDeque<Helpers.AssetItem>()
+    private var serverBaseUrl = ""
+    private var serverAuthSecret = ""
+    private val videoHttpClient by lazy { OkHttpClient() }
+    private val videoWatchdog = Runnable {
+        Log.w("MainActivity", "Video exceeded max duration, skipping")
+        finishVideo(failed = false)
+    }
     private val imageRunnable = object : Runnable {
         override fun run() {
             if (isImageTimerRunning) {
                 handler.postDelayed(this, (serverSettings.interval * 1000).toLong())
-                getNextImage()
+                getNextAsset()
             }
         }
     }
@@ -148,6 +169,7 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl("about:blank")
         imageView1 = findViewById(R.id.imageView1)
         imageView2 = findViewById(R.id.imageView2)
+        videoView = findViewById(R.id.videoView)
         txtPhotoInfo = findViewById(R.id.txtPhotoInfo)
         txtDateTime = findViewById(R.id.txtDateTime)
         btnPrevious = findViewById(R.id.btnPrevious)
@@ -410,6 +432,108 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    /**
+     * Picks the next asset from the server's asset list. Videos are played natively with
+     * ExoPlayer; for images the existing random-image flow is used so all image features
+     * (split view, thumbhash background, photo info) keep working unchanged.
+     */
+    private fun getNextAsset() {
+        if (isPlayingVideo) return
+        val next = assetQueue.removeFirstOrNull()
+        if (next != null) {
+            if (next.type.equals("video", ignoreCase = true)) {
+                playVideo(next.id)
+            } else {
+                getNextImage()
+            }
+            return
+        }
+        apiService.getAssets().enqueue(object : Callback<List<Helpers.AssetItem>> {
+            override fun onResponse(
+                call: Call<List<Helpers.AssetItem>>,
+                response: Response<List<Helpers.AssetItem>>
+            ) {
+                val assets = response.body()
+                if (response.isSuccessful && !assets.isNullOrEmpty()) {
+                    assetQueue.addAll(assets)
+                    getNextAsset()
+                } else {
+                    getNextImage()
+                }
+            }
+
+            override fun onFailure(call: Call<List<Helpers.AssetItem>>, t: Throwable) {
+                Log.w("MainActivity", "Asset list unavailable: ${t.localizedMessage}")
+                getNextImage()
+            }
+        })
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun playVideo(assetId: String) {
+        stopImageTimer()
+        zoomAnimator?.cancel()
+        isPlayingVideo = true
+
+        val url = serverBaseUrl.trimEnd('/') + "/api/Asset/$assetId/Asset"
+        val dataSourceFactory = OkHttpDataSource.Factory(videoHttpClient).apply {
+            if (serverAuthSecret.isNotEmpty()) {
+                setDefaultRequestProperties(mapOf("Authorization" to "Bearer $serverAuthSecret"))
+            }
+        }
+        val exoPlayer = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            .build()
+        player = exoPlayer
+        videoView.player = exoPlayer
+        exoPlayer.volume = if (serverSettings.playAudio) 1f else 0f
+        exoPlayer.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                when (playbackState) {
+                    Player.STATE_READY -> if (isPlayingVideo && !videoView.isVisible) {
+                        videoView.visibility = View.VISIBLE
+                        txtPhotoInfo.text = ""
+                        updateDateTimeWeather()
+                    }
+
+                    Player.STATE_ENDED -> finishVideo(failed = false)
+                    else -> Unit
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                Log.w("MainActivity", "Video playback failed: ${error.errorCodeName}", error)
+                finishVideo(failed = true)
+            }
+        })
+        exoPlayer.setMediaItem(MediaItem.fromUri(url))
+        exoPlayer.prepare()
+        exoPlayer.playWhenReady = true
+        handler.postDelayed(videoWatchdog, MAX_VIDEO_DURATION_MS)
+    }
+
+    private fun stopVideo() {
+        handler.removeCallbacks(videoWatchdog)
+        player?.release()
+        player = null
+        if (::videoView.isInitialized) {
+            videoView.player = null
+            videoView.visibility = View.GONE
+        }
+        isPlayingVideo = false
+    }
+
+    private fun finishVideo(failed: Boolean) {
+        if (!isPlayingVideo) return
+        stopVideo()
+        if (isFrameInactive == true) return
+        // Always follow a video with an image: avoids back-to-back videos (or the same one
+        // replaying in small albums) and stops a run of unplayable videos from looping fast
+        if (failed) Log.w("MainActivity", "Skipping to an image after video failure")
+        getNextImage()
+        startImageTimer()
+    }
+
     private fun startImageTimer() {
         if (!isImageTimerRunning) {
             isImageTimerRunning = true
@@ -620,6 +744,10 @@ class MainActivity : AppCompatActivity() {
             webView.settings.domStorageEnabled = true
             loadWebViewWithRetry(savedUrl)
         } else {
+            stopVideo()
+            assetQueue.clear()
+            serverBaseUrl = savedUrl
+            serverAuthSecret = authSecret
             retrofit = Helpers.createRetrofit(savedUrl, authSecret)
             apiService = retrofit!!.create(Helpers.ApiService::class.java)
             getServerSettings(
@@ -674,7 +802,7 @@ class MainActivity : AppCompatActivity() {
             txtDateTime.visibility = View.GONE
         }
 
-        getNextImage()
+        getNextAsset()
         startImageTimer()
 
         if (serverSettings.showWeatherDescription) {
@@ -688,6 +816,11 @@ class MainActivity : AppCompatActivity() {
             webView.requestFocus()
             val event = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT)
             dispatchKeyEvent(event)
+        } else if (isPlayingVideo) {
+            // Leave the video and go back to the last image shown before it
+            stopVideo()
+            currentImage?.let { showImage(it) }
+            startImageTimer()
         } else {
             val safePreviousImage = previousImage
             if (safePreviousImage != null) {
@@ -706,7 +839,8 @@ class MainActivity : AppCompatActivity() {
             dispatchKeyEvent(event)
         } else {
             stopImageTimer()
-            getNextImage()
+            stopVideo()
+            getNextAsset()
             startImageTimer()
         }
     }
@@ -717,12 +851,19 @@ class MainActivity : AppCompatActivity() {
             webView.requestFocus()
             val event = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SPACE)
             dispatchKeyEvent(event)
+        } else if (isPlayingVideo) {
+            player?.let { it.playWhenReady = !it.playWhenReady }
+            // Don't let the safety timeout skip a video the user paused on purpose
+            handler.removeCallbacks(videoWatchdog)
+            if (player?.playWhenReady == true) {
+                handler.postDelayed(videoWatchdog, MAX_VIDEO_DURATION_MS)
+            }
         } else {
             zoomAnimator?.cancel()
             if (isImageTimerRunning) {
                 stopImageTimer()
             } else {
-                getNextImage()
+                getNextAsset()
                 startImageTimer()
             }
         }
@@ -731,6 +872,7 @@ class MainActivity : AppCompatActivity() {
     private fun settingsAction() {
         val intent = Intent(this, SettingsActivity::class.java)
         stopImageTimer()
+        stopVideo()
         settingsLauncher.launch(intent)
     }
 
@@ -858,6 +1000,7 @@ class MainActivity : AppCompatActivity() {
             isFrameInactive = true
             // Stop refreshing content while inactive
             stopImageTimer()
+            stopVideo()
             stopWeatherTimer()
             if (useWebView) {
                 webView.loadUrl("about:blank")
@@ -1041,6 +1184,7 @@ class MainActivity : AppCompatActivity() {
         rcpServer.stop()
         unregisterReceiver(screenStateReceiver)
         handler.removeCallbacksAndMessages(null)
+        stopVideo()
     }
 
     private fun loadWebViewWithRetry(
@@ -1074,5 +1218,10 @@ class MainActivity : AppCompatActivity() {
                 webView.loadUrl(url)
             }
         }
+    }
+
+    companion object {
+        /** Safety cap so a stalled or very long video never blocks the slideshow. */
+        private const val MAX_VIDEO_DURATION_MS = 5 * 60 * 1000L
     }
 }

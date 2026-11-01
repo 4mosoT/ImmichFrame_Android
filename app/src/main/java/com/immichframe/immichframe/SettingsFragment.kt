@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.admin.DevicePolicyManager
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -13,6 +14,7 @@ import android.text.InputType
 import android.widget.Toast
 import androidx.preference.EditTextPreference
 import androidx.preference.Preference
+import androidx.preference.SeekBarPreference
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.PreferenceManager
 import androidx.preference.SwitchPreferenceCompat
@@ -23,6 +25,7 @@ import java.util.Locale
 class SettingsFragment : PreferenceFragmentCompat() {
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         setPreferencesFromResource(R.xml.settings_view, rootKey)
+        setupVolumePreference()
         val chkUseWebView = findPreference<SwitchPreferenceCompat>("useWebView")
         val chkBlurredBackground = findPreference<SwitchPreferenceCompat>("blurredBackground")
         val chkShowCurrentDate = findPreference<SwitchPreferenceCompat>("showCurrentDate")
@@ -208,6 +211,22 @@ class SettingsFragment : PreferenceFragmentCompat() {
             "Enabled — the frame can turn off the screen and sleep the device. Tap to disable."
         } else {
             "Allow the frame to turn off the screen and sleep the device during inactive hours"
+        }
+    }
+
+    /** Lets the media (video) volume be changed without leaving the app. */
+    private fun setupVolumePreference() {
+        val volumePref = findPreference<SeekBarPreference>("mediaVolume") ?: return
+        val audioManager = requireContext().getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        volumePref.max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        volumePref.value = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        volumePref.setOnPreferenceChangeListener { _, newValue ->
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                newValue as Int,
+                AudioManager.FLAG_PLAY_SOUND
+            )
+            true
         }
     }
 }
