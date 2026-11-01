@@ -39,7 +39,7 @@
             android:visibility="gone"
             app:use_controller="false"
             app:resize_mode="fit"
-            app:surface_type="surface_view"
+            app:surface_type="texture_view"
             app:shutter_background_color="@color/black" />
 
         <TextView

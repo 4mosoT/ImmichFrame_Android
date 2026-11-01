@@ -399,7 +399,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun getNextImage() {
+    private fun getNextImage(attempt: Int = 0) {
         apiService.getImageData().enqueue(object : Callback<Helpers.ImageResponse> {
             override fun onResponse(
                 call: Call<Helpers.ImageResponse>,
@@ -412,6 +412,10 @@ class MainActivity : AppCompatActivity() {
                         currentImage = imageResponse
                         showImage(imageResponse)
                     }
+                } else if (response.code() >= 500 && attempt < MAX_IMAGE_RETRIES) {
+                    // The server samples a few random assets and fails when none is an image,
+                    // which happens now and then in video-heavy albums: just ask again
+                    getNextImage(attempt + 1)
                 } else {
                     Toast.makeText(
                         this@MainActivity,
@@ -527,10 +531,9 @@ class MainActivity : AppCompatActivity() {
         if (!isPlayingVideo) return
         stopVideo()
         if (isFrameInactive == true) return
-        // Always follow a video with an image: avoids back-to-back videos (or the same one
-        // replaying in small albums) and stops a run of unplayable videos from looping fast
-        if (failed) Log.w("MainActivity", "Skipping to an image after video failure")
-        getNextImage()
+        // Keep the server's order; only after a failure fall back to an image so a run of
+        // unplayable videos can't loop fast
+        if (failed) getNextImage() else getNextAsset()
         startImageTimer()
     }
 
@@ -1223,5 +1226,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         /** Safety cap so a stalled or very long video never blocks the slideshow. */
         private const val MAX_VIDEO_DURATION_MS = 5 * 60 * 1000L
+        private const val MAX_IMAGE_RETRIES = 3
     }
 }
